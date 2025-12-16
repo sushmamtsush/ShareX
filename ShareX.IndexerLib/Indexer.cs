@@ -76,12 +76,15 @@ namespace ShareX.IndexerLib
 
                     foreach (DirectoryInfo directoryInfo in currentDirectoryInfo.EnumerateDirectories())
                     {
-                        if (settings.SkipHiddenFolders && directoryInfo.Attributes.HasFlag(FileAttributes.Hidden))
+                        foreach (FileInfo fileInfo in currentDirectoryInfo.EnumerateFiles())
                         {
-                            continue;
+                            if (settings.SkipHiddenFiles && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
+                            {
+                                continue;
+                            }
                         }
 
-                        FolderInfo subFolderInfo = GetFolderInfo(directoryInfo.FullName, level + 1);
+                            FolderInfo subFolderInfo = GetFolderInfo(directoryInfo.FullName, level + 1);
                         folderInfo.Folders.Add(subFolderInfo);
                         subFolderInfo.Parent = folderInfo;
                     }
@@ -97,6 +100,8 @@ namespace ShareX.IndexerLib
 
                             folderInfo.Files.Add(fileInfo);
                         }
+
+
 
                         folderInfo.Files.Sort((x, y) => x.Name.CompareTo(y.Name));
                     }
