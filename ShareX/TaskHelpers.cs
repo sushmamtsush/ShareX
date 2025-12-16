@@ -73,7 +73,6 @@ namespace ShareX
             switch (job)
             {
                 // Upload
-
                 case HotkeyType.FileUpload:
                     if (!string.IsNullOrEmpty(filePath))
                     {
@@ -84,7 +83,6 @@ namespace ShareX
                         UploadManager.UploadFile(safeTaskSettings);
                     }
                     break;
-
                 case HotkeyType.FolderUpload:
                     UploadManager.UploadFolder(safeTaskSettings);
                     break;
