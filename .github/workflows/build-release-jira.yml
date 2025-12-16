@@ -1,0 +1,90 @@
+name: Build, Release & Jira Update
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '7.0.x'
+
+    - name: Restore Dependencies
+      run: dotnet restore ShareX.sln
+
+    - name: Build
+      run: dotnet build ShareX.sln --configuration Release --no-restore
+
+    - name: Run Tests
+      run: dotnet test ShareX.sln --configuration Release --no-build
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sharex-build
+        path: |
+          **/bin/Release/**
+
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: sharex-build
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ github.run_number }}
+        name: ShareX Release v${{ github.run_number }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  jira:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Extract Jira Issue Keys
+      id: extract
+      run: |
+        echo "ISSUES=$(git log -1 --pretty=%B | grep -oE '[A-Z]+-[0-9]+' | tr '\n' ' ')" >> $GITHUB_ENV
+
+    - name: Comment on Jira Issues
+      uses: atlassian/gajira-comment@v3
+      if: env.ISSUES != ''
+      with:
+        issue: ${{ env.ISSUES }}
+        body: |
+          ✅ **Build & Release Completed**
+          
+          • Repository: ${{ github.repository }}
+          • Branch: main
+          • Release: v${{ github.run_number }}
+          • Commit: ${{ github.sha }}
+
+          🔗 GitHub Release:
+          https://github.com/${{ github.repository }}/releases/tag/v${{ github.run_number }}
+      env:
+        JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+        JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
