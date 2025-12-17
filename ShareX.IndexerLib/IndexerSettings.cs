@@ -41,9 +41,6 @@ namespace ShareX.IndexerLib
         [Category("Indexer"), DefaultValue(true), Description("Don't index hidden files.")]
         public bool SkipHiddenFiles { get; set; }
 
-        [Category("Indexer"), DefaultValue(false), Description("Index only folders and skip files.")]
-        public bool SkipFiles { get; set; }
-
 
 
         [Category("Indexer"), DefaultValue(0), Description("Maximum folder depth level for indexing. 0 means unlimited.")]

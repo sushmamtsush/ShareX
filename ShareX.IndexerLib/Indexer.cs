@@ -89,8 +89,7 @@ namespace ShareX.IndexerLib
                         subFolderInfo.Parent = folderInfo;
                     }
 
-                    if (!settings.SkipFiles)
-                    {
+                    
                         foreach (FileInfo fileInfo in currentDirectoryInfo.EnumerateFiles())
                         {
                             if (settings.SkipHiddenFiles && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
@@ -101,8 +100,8 @@ namespace ShareX.IndexerLib
                             folderInfo.Files.Add(fileInfo);
                         }
 
-                        folderInfo.Files.Sort((x, y) => x.Name.CompareTo(y.Name));
-                    }
+
+
                      
                     
                 }
