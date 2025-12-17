@@ -1,109 +1,142 @@
-name: Create Jira Bug from GitHub
+name: GitHub Issue → Jira Bug with Commits Linked
 
 on:
+  issues:
+    types: [opened]
   push:
     branches:
-      - "**"
+      - main
+      - develop
 
 jobs:
-  jira-bug:
+  create-jira-issue:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Create Jira Bug
-        id: create_jira
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl wget
+
+      - name: Create Jira issue and link commits
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-
-          BUILD_VERSION: "1.3.0"
-          BUILD_CONFIG: "Release"
-          LAST_WORKING_BUILD: "1.2.9"
-          REGRESSION: "Yes"
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          GITHUB_REPO_URL: ${{ github.repositoryUrl }}
         run: |
-          SUMMARY="${{ github.event.head_commit.message }}"
-          COMMIT="${{ github.sha }}"
+          ISSUE_BODY="${{ github.event.issue.body }}"
 
-          jq -n \
+          # Extract field function
+          extract_field() {
+            echo "$ISSUE_BODY" | awk -v field="$1" '
+              BEGIN {RS="## "; FS="\n"} $1==field {for(i=2;i<=NF;i++) print $i}'
+          }
+
+          SUMMARY=$(extract_field "Summary")
+          PRIORITY=$(extract_field "Priority")
+          ASSIGNEE=$(extract_field "Assignee")
+          REPORTER=$(extract_field "Reporter")
+          COMPONENTS=$(extract_field "Components" | tr ',' '\n' | awk '{$1=$1; print}')
+          BUILD_VERSION=$(extract_field "Build Version")
+          BUILD_CONFIG=$(extract_field "Build Configuration")
+          REGRESSION=$(extract_field "Regression")
+          LAST_WORKING_BUILD=$(extract_field "Last Working Build")
+          EXPECTED_BEHAVIOR=$(extract_field "Expected Behavior")
+          ACTUAL_BEHAVIOR=$(extract_field "Actual Behavior")
+          TEST_STEPS=$(extract_field "Test Steps")
+          ENVIRONMENT=$(extract_field "Environment")
+          ATTACHMENTS=$(extract_field "Attachments" | grep -oP '(?<=\]\().*?(?=\))')
+
+          # Map Priority
+          case $PRIORITY in
+            Highest) PRIORITY_ID="1" ;;
+            High)    PRIORITY_ID="2" ;;
+            Medium)  PRIORITY_ID="3" ;;
+            Low)     PRIORITY_ID="4" ;;
+            Lowest)  PRIORITY_ID="5" ;;
+            *)       PRIORITY_ID="3" ;;
+          esac
+
+          # Get commit IDs from push event
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            COMMITS=$(jq -r '.commits[].id' $GITHUB_EVENT_PATH)
+          else
+            COMMITS=""
+          fi
+
+          # JSON payload to create Jira Bug
+          payload=$(jq -n \
+            --arg project "$JIRA_PROJECT_KEY" \
             --arg summary "$SUMMARY" \
-            --arg commit "$COMMIT" \
+            --arg description "$TEST_STEPS" \
             --arg buildVersion "$BUILD_VERSION" \
             --arg buildConfig "$BUILD_CONFIG" \
-            --arg lastBuild "$LAST_WORKING_BUILD" \
             --arg regression "$REGRESSION" \
+            --arg lastWorkingBuild "$LAST_WORKING_BUILD" \
+            --arg expectedBehavior "$EXPECTED_BEHAVIOR" \
+            --arg actualBehavior "$ACTUAL_BEHAVIOR" \
+            --arg environment "$ENVIRONMENT" \
+            --argjson components "$(jq -n '$ARGS.positional | map({name: .})' --args $COMPONENTS)" \
+            --arg priority_id "$PRIORITY_ID" \
+            --arg assignee "$ASSIGNEE" \
+            --arg reporter "$REPORTER" \
             '{
               fields: {
-                project: { key: "SHAR" },
-                issuetype: { name: "Bug" },
+                project: { key: $project },
                 summary: $summary,
-                priority: { name: "High" },
-
-                description: ("Automatically created from GitHub CI\nCommit: " + $commit),
-
+                description: $description,
+                issuetype: { name: "Bug" },
+                components: $components,
+                priority: { id: $priority_id },
+                assignee: { name: $assignee },
+                reporter: { name: $reporter },
+                labels: ["github", "auto-created"],
                 customfield_10247: $buildVersion,
-                customfield_10248: { value: $buildConfig },
-                customfield_10249: { value: $regression },
-                customfield_10251: $lastBuild,
-
-                customfield_10290: "Expected behavior from CI execution",
-                customfield_10286: "Failure observed during automated build"
+                customfield_10248: $buildConfig,
+                customfield_10249: $regression,
+                customfield_10251: $lastWorkingBuild,
+                customfield_10290: $expectedBehavior,
+                customfield_10286: $actualBehavior,
+                environment: $environment
               }
-            }' > payload.json
+            }')
 
-          RESPONSE=$(curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
+          # Create Jira issue
+          response=$(curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
             -X POST \
+            -H "Content-Type: application/json" \
             "$JIRA_BASE_URL/rest/api/3/issue" \
-            --data @payload.json)
+            --data "$payload")
 
-          ISSUE_KEY=$(echo "$RESPONSE" | jq -r '.key')
+          ISSUE_KEY=$(echo "$response" | jq -r '.key')
+          echo "Created Jira Issue: $ISSUE_KEY"
 
-          echo "Jira Issue Created: $ISSUE_KEY"
-          echo "issue_key=$ISSUE_KEY" >> $GITHUB_OUTPUT
+          # Upload attachments
+          mkdir -p /tmp/github_attachments
+          for url in $ATTACHMENTS; do
+            filename=$(basename "$url")
+            wget -q "$url" -O "/tmp/github_attachments/$filename"
+            curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+              -X POST \
+              -H "X-Atlassian-Token: no-check" \
+              -F "file=@/tmp/github_attachments/$filename" \
+              "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/attachments"
+          done
 
-      - name: Attach Logs
-        if: always()
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          ISSUE_KEY: ${{ steps.create_jira.outputs.issue_key }}
-        run: |
-          echo "Sample log content" > build.log
+          # Add remote issue links for commits
+          for commit in $COMMITS; do
+            commit_url="$GITHUB_REPO_URL/commit/$commit"
+            link_payload=$(jq -n \
+              --arg url "$commit_url" \
+              --arg title "GitHub Commit $commit" \
+              '{object: {url: $url, title: $title}}')
+            curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/remotelink" \
+              --data "$link_payload"
+          done
 
-          curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
-            -H "X-Atlassian-Token: no-check" \
-            -F "file=@build.log" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/attachments"
-
-      - name: Add Jira Comment
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          ISSUE_KEY: ${{ steps.create_jira.outputs.issue_key }}
-        run: |
-          jq -n \
-            --arg text "Build and logs attached automatically from GitHub Actions." \
-            '{
-              body: {
-                type: "doc",
-                version: 1,
-                content: [
-                  {
-                    type: "paragraph",
-                    content: [{ type: "text", text: $text }]
-                  }
-                ]
-              }
-            }' > comment.json
-
-          curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/comment" \
-            --data @comment.json
+          echo "Jira issue $ISSUE_KEY updated with attachments and commit links."
