@@ -1,55 +1,91 @@
-- name: Create Jira Issue via API
-  env:
-    JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-    JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-    JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-    JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
-    COMMIT_MSG: ${{ github.event.head_commit.message }}
-    REPO: ${{ github.repository }}
-    SHA: ${{ github.sha }}
-  run: |
-    echo "Creating Jira issue..."
+name: Auto Jira Issue + Build
 
-    jq -n \
-      --arg project "$JIRA_PROJECT_KEY" \
-      --arg summary "$COMMIT_MSG" \
-      --arg repo "$REPO" \
-      --arg sha "$SHA" \
-      '{
-        fields: {
-          project: { key: $project },
-          summary: $summary,
-          description: {
-            type: "doc",
-            version: 1,
-            content: [
-              {
-                type: "paragraph",
-                content: [{ type: "text", text: "Automatically created from GitHub push." }]
-              },
-              {
-                type: "paragraph",
-                content: [
-                  { type: "text", text: "Repository: " },
-                  { type: "text", text: $repo, marks: [{ type: "strong" }] }
-                ]
-              },
-              {
-                type: "paragraph",
-                content: [
-                  { type: "text", text: "Commit: " },
-                  { type: "text", text: $sha }
-                ]
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  jira-create:
+    name: Create Jira Issue
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create Jira Issue via API
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "Creating Jira issue..."
+
+          jq -n \
+            --arg project "$JIRA_PROJECT_KEY" \
+            --arg summary "$COMMIT_MSG" \
+            --arg repo "$REPO" \
+            --arg sha "$SHA" \
+            '{
+              fields: {
+                project: { key: $project },
+                summary: $summary,
+                description: {
+                  type: "doc",
+                  version: 1,
+                  content: [
+                    {
+                      type: "paragraph",
+                      content: [{ type: "text", text: "Automatically created from GitHub push." }]
+                    },
+                    {
+                      type: "paragraph",
+                      content: [
+                        { type: "text", text: "Repository: " },
+                        { type: "text", text: $repo, marks: [{ type: "strong" }] }
+                      ]
+                    },
+                    {
+                      type: "paragraph",
+                      content: [
+                        { type: "text", text: "Commit: " },
+                        { type: "text", text: $sha }
+                      ]
+                    }
+                  ]
+                },
+                issuetype: { name: "Task" },
+                labels: ["github", "auto-created"]
               }
-            ]
-          },
-          issuetype: { name: "Task" },
-          labels: ["github", "auto-created"]
-        }
-      }' > payload.json
+            }' > payload.json
 
-    curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
-      -H "Content-Type: application/json" \
-      -X POST \
-      "$JIRA_BASE_URL/rest/api/3/issue" \
-      --data @payload.json
+          curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            "$JIRA_BASE_URL/rest/api/3/issue" \
+            --data @payload.json
+
+  build:
+    name: Build Project
+    needs: jira-create
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "7.0.x"
+
+      - name: Restore
+        run: dotnet restore ShareX.sln
+
+      - name: Build
+        run: dotnet build ShareX.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test ShareX.sln --configuration Release --no-build
