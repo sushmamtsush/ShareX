@@ -1,4 +1,4 @@
-name: Auto Jira Issue + Build
+name: Create Jira Bug from GitHub
 
 on:
   push:
@@ -6,86 +6,104 @@ on:
       - "**"
 
 jobs:
-  jira-create:
-    name: Create Jira Issue
+  jira-bug:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Create Jira Issue via API
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Jira Bug
+        id: create_jira
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+
+          BUILD_VERSION: "1.3.0"
+          BUILD_CONFIG: "Release"
+          LAST_WORKING_BUILD: "1.2.9"
+          REGRESSION: "Yes"
         run: |
-          echo "Creating Jira issue..."
+          SUMMARY="${{ github.event.head_commit.message }}"
+          COMMIT="${{ github.sha }}"
 
           jq -n \
-            --arg project "$JIRA_PROJECT_KEY" \
-            --arg summary "$COMMIT_MSG" \
-            --arg repo "$REPO" \
-            --arg sha "$SHA" \
+            --arg summary "$SUMMARY" \
+            --arg commit "$COMMIT" \
+            --arg buildVersion "$BUILD_VERSION" \
+            --arg buildConfig "$BUILD_CONFIG" \
+            --arg lastBuild "$LAST_WORKING_BUILD" \
+            --arg regression "$REGRESSION" \
             '{
               fields: {
-                project: { key: $project },
+                project: { key: "SHAR" },
+                issuetype: { name: "Bug" },
                 summary: $summary,
-                description: {
-                  type: "doc",
-                  version: 1,
-                  content: [
-                    {
-                      type: "paragraph",
-                      content: [{ type: "text", text: "Automatically created from GitHub push." }]
-                    },
-                    {
-                      type: "paragraph",
-                      content: [
-                        { type: "text", text: "Repository: " },
-                        { type: "text", text: $repo, marks: [{ type: "strong" }] }
-                      ]
-                    },
-                    {
-                      type: "paragraph",
-                      content: [
-                        { type: "text", text: "Commit: " },
-                        { type: "text", text: $sha }
-                      ]
-                    }
-                  ]
-                },
-                issuetype: { name: "Task" },
-                labels: ["github", "auto-created"]
+                priority: { name: "High" },
+
+                description: ("Automatically created from GitHub CI\nCommit: " + $commit),
+
+                customfield_10247: $buildVersion,
+                customfield_10248: { value: $buildConfig },
+                customfield_10249: { value: $regression },
+                customfield_10251: $lastBuild,
+
+                customfield_10290: "Expected behavior from CI execution",
+                customfield_10286: "Failure observed during automated build"
               }
             }' > payload.json
+
+          RESPONSE=$(curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            "$JIRA_BASE_URL/rest/api/3/issue" \
+            --data @payload.json)
+
+          ISSUE_KEY=$(echo "$RESPONSE" | jq -r '.key')
+
+          echo "Jira Issue Created: $ISSUE_KEY"
+          echo "issue_key=$ISSUE_KEY" >> $GITHUB_OUTPUT
+
+      - name: Attach Logs
+        if: always()
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.create_jira.outputs.issue_key }}
+        run: |
+          echo "Sample log content" > build.log
+
+          curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "X-Atlassian-Token: no-check" \
+            -F "file=@build.log" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/attachments"
+
+      - name: Add Jira Comment
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ steps.create_jira.outputs.issue_key }}
+        run: |
+          jq -n \
+            --arg text "Build and logs attached automatically from GitHub Actions." \
+            '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: $text }]
+                  }
+                ]
+              }
+            }' > comment.json
 
           curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
             -X POST \
-            "$JIRA_BASE_URL/rest/api/3/issue" \
-            --data @payload.json
-
-  build:
-    name: Build Project
-    needs: jira-create
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "7.0.x"
-
-      - name: Restore
-        run: dotnet restore ShareX.sln
-
-      - name: Build
-        run: dotnet build ShareX.sln --configuration Release --no-restore
-
-      - name: Test
-        run: dotnet test ShareX.sln --configuration Release --no-build
+            "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/comment" \
+            --data @comment.json
