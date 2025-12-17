@@ -1,80 +1,61 @@
-name: GitHub Issue → Jira Bug with Commits Linked
+name: Advanced Jira Bug Creator
 
 on:
   issues:
     types: [opened]
   push:
-    branches:
-      - main
-      - develop
 
 jobs:
-  create-jira-issue:
+  create-jira-bug:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq curl wget
-
-      - name: Create Jira issue and link commits
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
-          GITHUB_REPO_URL: ${{ github.repositoryUrl }}
+      - name: Set Jira environment variables
         run: |
-          ISSUE_BODY="${{ github.event.issue.body }}"
+          echo "JIRA_BASE_URL=${{ secrets.JIRA_BASE_URL }}" >> $GITHUB_ENV
+          echo "JIRA_USER_EMAIL=${{ secrets.JIRA_USER_EMAIL }}" >> $GITHUB_ENV
+          echo "JIRA_API_TOKEN=${{ secrets.JIRA_API_TOKEN }}" >> $GITHUB_ENV
+          echo "JIRA_PROJECT_KEY=${{ secrets.JIRA_PROJECT_KEY }}" >> $GITHUB_ENV
+          echo "GITHUB_REPO_URL=https://github.com/${{ github.repository }}" >> $GITHUB_ENV
 
-          # Extract field function
-          extract_field() {
-            echo "$ISSUE_BODY" | awk -v field="$1" '
-              BEGIN {RS="## "; FS="\n"} $1==field {for(i=2;i<=NF;i++) print $i}'
-          }
+      - name: Parse GitHub Issue and Create Jira Bug
+        shell: bash
+        run: |
+          ISSUE_BODY=$(jq -r '.issue.body // ""' $GITHUB_EVENT_PATH)
 
-          SUMMARY=$(extract_field "Summary")
-          PRIORITY=$(extract_field "Priority")
-          ASSIGNEE=$(extract_field "Assignee")
-          REPORTER=$(extract_field "Reporter")
-          COMPONENTS=$(extract_field "Components" | tr ',' '\n' | awk '{$1=$1; print}')
-          BUILD_VERSION=$(extract_field "Build Version")
-          BUILD_CONFIG=$(extract_field "Build Configuration")
-          REGRESSION=$(extract_field "Regression")
-          LAST_WORKING_BUILD=$(extract_field "Last Working Build")
-          EXPECTED_BEHAVIOR=$(extract_field "Expected Behavior")
-          ACTUAL_BEHAVIOR=$(extract_field "Actual Behavior")
-          TEST_STEPS=$(extract_field "Test Steps")
-          ENVIRONMENT=$(extract_field "Environment")
-          ATTACHMENTS=$(extract_field "Attachments" | grep -oP '(?<=\]\().*?(?=\))')
+          # --- SMART FIELD DETECTION ---
+          SUMMARY=$(echo "$ISSUE_BODY" | head -n1)
+          PRIORITY=$(echo "$ISSUE_BODY" | grep -i "priority:" | head -n1 | cut -d':' -f2 | xargs)
+          ASSIGNEE=$(echo "$ISSUE_BODY" | grep -i "assignee:" | head -n1 | cut -d':' -f2 | xargs)
+          REPORTER=$(echo "$ISSUE_BODY" | grep -i "reporter:" | head -n1 | cut -d':' -f2 | xargs)
+          COMPONENTS=$(echo "$ISSUE_BODY" | grep -i "components:" | head -n1 | cut -d':' -f2 | tr ',' '\n' | awk '{$1=$1; print}')
 
-          # Map Priority
-          case $PRIORITY in
-            Highest) PRIORITY_ID="1" ;;
-            High)    PRIORITY_ID="2" ;;
-            Medium)  PRIORITY_ID="3" ;;
-            Low)     PRIORITY_ID="4" ;;
-            Lowest)  PRIORITY_ID="5" ;;
+          # --- Auto-detect description sections ---
+          EXPECTED_BEHAVIOR=$(echo "$ISSUE_BODY" | sed -n '/expected behavior:/I, /actual behavior:/I{ /expected behavior:/I!p }' | xargs)
+          ACTUAL_BEHAVIOR=$(echo "$ISSUE_BODY" | sed -n '/actual behavior:/I, /steps:/I{ /actual behavior:/I!p }' | xargs)
+          TEST_STEPS=$(echo "$ISSUE_BODY" | sed -n '/steps:/I, /environment:/I{ /steps:/I!p }' | xargs)
+          ENVIRONMENT=$(echo "$ISSUE_BODY" | sed -n '/environment:/I, /attachments:/I{ /environment:/I!p }' | xargs)
+
+          # --- Attachments ---
+          ATTACHMENTS=$(echo "$ISSUE_BODY" | grep -oP '(?<=\]\().*?(?=\))')
+
+          # --- Priority mapping ---
+          case "${PRIORITY,,}" in
+            highest) PRIORITY_ID="1" ;;
+            high)    PRIORITY_ID="2" ;;
+            medium)  PRIORITY_ID="3" ;;
+            low)     PRIORITY_ID="4" ;;
+            lowest)  PRIORITY_ID="5" ;;
             *)       PRIORITY_ID="3" ;;
           esac
 
-          # Get commit IDs from push event
-          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            COMMITS=$(jq -r '.commits[].id' $GITHUB_EVENT_PATH)
-          else
-            COMMITS=""
-          fi
-
-          # JSON payload to create Jira Bug
+          # --- Jira payload ---
           payload=$(jq -n \
             --arg project "$JIRA_PROJECT_KEY" \
             --arg summary "$SUMMARY" \
             --arg description "$TEST_STEPS" \
-            --arg buildVersion "$BUILD_VERSION" \
-            --arg buildConfig "$BUILD_CONFIG" \
-            --arg regression "$REGRESSION" \
-            --arg lastWorkingBuild "$LAST_WORKING_BUILD" \
             --arg expectedBehavior "$EXPECTED_BEHAVIOR" \
             --arg actualBehavior "$ACTUAL_BEHAVIOR" \
             --arg environment "$ENVIRONMENT" \
@@ -93,17 +74,13 @@ jobs:
                 assignee: { name: $assignee },
                 reporter: { name: $reporter },
                 labels: ["github", "auto-created"],
-                customfield_10247: $buildVersion,
-                customfield_10248: $buildConfig,
-                customfield_10249: $regression,
-                customfield_10251: $lastWorkingBuild,
                 customfield_10290: $expectedBehavior,
                 customfield_10286: $actualBehavior,
                 environment: $environment
               }
             }')
 
-          # Create Jira issue
+          # --- Create Jira Issue ---
           response=$(curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
             -X POST \
             -H "Content-Type: application/json" \
@@ -113,7 +90,7 @@ jobs:
           ISSUE_KEY=$(echo "$response" | jq -r '.key')
           echo "Created Jira Issue: $ISSUE_KEY"
 
-          # Upload attachments
+          # --- Upload attachments ---
           mkdir -p /tmp/github_attachments
           for url in $ATTACHMENTS; do
             filename=$(basename "$url")
@@ -125,18 +102,4 @@ jobs:
               "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/attachments"
           done
 
-          # Add remote issue links for commits
-          for commit in $COMMITS; do
-            commit_url="$GITHUB_REPO_URL/commit/$commit"
-            link_payload=$(jq -n \
-              --arg url "$commit_url" \
-              --arg title "GitHub Commit $commit" \
-              '{object: {url: $url, title: $title}}')
-            curl -s -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
-              -X POST \
-              -H "Content-Type: application/json" \
-              "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/remotelink" \
-              --data "$link_payload"
-          done
-
-          echo "Jira issue $ISSUE_KEY updated with attachments and commit links."
+          echo "Jira issue $ISSUE_KEY updated with attachments and structured fields."
